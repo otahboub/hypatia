@@ -8,10 +8,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /work
 
-# Python deps. scipy>=1.11 ships the HiGHS LP/MILP backend (no license needed).
-# Add highspy for the standalone solver, pulp+networkx as alternatives.
+# Solver deps. scipy>=1.11 ships the HiGHS LP/MILP backend (no license needed).
 RUN pip install --no-cache-dir \
     numpy scipy networkx highspy pulp
+
+# Full satgenpy import chain (matches hypatia_install_dependencies.sh). `from
+# satgen import ...` loads every submodule, so the topology run needs all of:
+# astropy/ephem/sgp4 (TLE propagation), geopy, matplotlib/statsmodels, and
+# cartopy (needs PROJ/GEOS system libs) + exputil (hypatia helper, from git).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgeos-dev libproj-dev proj-data proj-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir \
+        astropy ephem sgp4 geopy matplotlib statsmodels cartopy \
+    && pip install --no-cache-dir "git+https://github.com/snkas/exputilpy.git@v1.6"
 
 # The experiment scripts (mounted or COPY'd at deploy time)
 COPY ilp_optimality.py /work/ilp_optimality.py
