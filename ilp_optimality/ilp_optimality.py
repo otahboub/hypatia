@@ -59,6 +59,11 @@ def solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay, eps=1e-6):
     def fvar(k, e): return k * E + eidx[e]
     def ovar(e):    return nF + eidx[e]
 
+    # Solve in Gbps, not bps. Raw demands/caps are ~1e9-1e12, which wrecks HiGHS
+    # numerical conditioning at high load (spurious "Unknown/Infeasible", status 15).
+    # Scale all magnitudes down by SCALE, solve, then scale the reservoir back to bps.
+    SCALE = 1e9
+
     # objective: minimise Σ over[e]
     c = np.zeros(N)
     for e in edges:
@@ -81,8 +86,8 @@ def solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay, eps=1e-6):
                 eq_data.append(1.0);  eq_row.append(nrow); eq_col.append(fvar(k, e))
             for e in in_edges[n]:
                 eq_data.append(-1.0); eq_row.append(nrow); eq_col.append(fvar(k, e))
-            if n == fl["src"]:   rhs = fl["demand_bps"]
-            elif n == fl["dst"]: rhs = -fl["demand_bps"]
+            if n == fl["src"]:   rhs = fl["demand_bps"] / SCALE
+            elif n == fl["dst"]: rhs = -fl["demand_bps"] / SCALE
             else:                rhs = 0.0
             b_eq.append(rhs); nrow += 1
     if nrow:
@@ -98,7 +103,7 @@ def solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay, eps=1e-6):
         for k in range(K):
             ub_data.append(1.0);  ub_row.append(i); ub_col.append(fvar(k, e))
         ub_data.append(-1.0); ub_row.append(i); ub_col.append(ovar(e))
-        b_ub[i] = cap[e]
+        b_ub[i] = cap[e] / SCALE
     A_ub = coo_matrix((ub_data, (ub_row, ub_col)), shape=(E, N)).tocsr()
 
     bounds = [(0, None)] * N
@@ -110,7 +115,7 @@ def solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay, eps=1e-6):
                   bounds=bounds, method=method)
     if not res.success:
         return {"feasible": False, "opt_reservoir_bps": None, "status": res.message}
-    over_total = sum(res.x[ovar(e)] for e in edges)
+    over_total = sum(res.x[ovar(e)] for e in edges) * SCALE  # Gbps solve -> bps
     return {"feasible": True, "opt_reservoir_bps": float(over_total),
             "status": "optimal"}
 
