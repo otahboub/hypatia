@@ -22,11 +22,11 @@ Two model fidelities:
 Solver: scipy.optimize (HiGHS backend) by default — no external license needed.
 Reads the SAME DynamicState the harness uses, so the comparison is apples-to-apples.
 """
-import argparse, csv, json, math, sys
+import argparse, csv, json, math, os, sys
 from collections import defaultdict
 import numpy as np
 from scipy.optimize import linprog
-from scipy.sparse import lil_matrix
+from scipy.sparse import coo_matrix
 
 
 def solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay, eps=1e-6):
@@ -64,44 +64,50 @@ def solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay, eps=1e-6):
     for e in edges:
         c[ovar(e)] = 1.0
 
-    rows_eq = []   # flow conservation equalities
-    b_eq = []
-    A_eq = lil_matrix((0, N))
-
     out_edges = defaultdict(list); in_edges = defaultdict(list)
     for (u, v) in edges:
         out_edges[u].append((u, v)); in_edges[v].append((u, v))
 
     # conservation: for each commodity k, each node n:
     #   Σ_out f - Σ_in f = supply(n)   (demand at src, -demand at dst, 0 else)
-    eq_rows = []
+    # Built SPARSE (COO triplets): the dense A_eq is (K·|nodes|)×N -> tens of GiB
+    # at constellation scale (e.g. 48.5 GiB for 28 flows / 6380 up-links), but it
+    # is highly sparse, so we store only the nonzeros. HiGHS accepts sparse A_eq/A_ub.
+    eq_data = []; eq_row = []; eq_col = []; b_eq = []
+    nrow = 0
     for k, fl in enumerate(flows):
         for n in nodes:
-            row = np.zeros(N)
-            for e in out_edges[n]: row[fvar(k, e)] += 1.0
-            for e in in_edges[n]:  row[fvar(k, e)] -= 1.0
+            for e in out_edges[n]:
+                eq_data.append(1.0);  eq_row.append(nrow); eq_col.append(fvar(k, e))
+            for e in in_edges[n]:
+                eq_data.append(-1.0); eq_row.append(nrow); eq_col.append(fvar(k, e))
             if n == fl["src"]:   rhs = fl["demand_bps"]
             elif n == fl["dst"]: rhs = -fl["demand_bps"]
             else:                rhs = 0.0
-            eq_rows.append((row, rhs))
-    if eq_rows:
-        A_eq = np.array([r for r, _ in eq_rows])
-        b_eq = np.array([b for _, b in eq_rows])
+            b_eq.append(rhs); nrow += 1
+    if nrow:
+        A_eq = coo_matrix((eq_data, (eq_row, eq_col)), shape=(nrow, N)).tocsr()
+        b_eq = np.array(b_eq)
     else:
         A_eq = None; b_eq = None
 
-    # capacity with oversub slack: Σ_k f[k,e] - over[e] <= cap[e]
-    A_ub = np.zeros((E, N)); b_ub = np.zeros(E)
+    # capacity with oversub slack: Σ_k f[k,e] - over[e] <= cap[e]  (also sparse)
+    ub_data = []; ub_row = []; ub_col = []; b_ub = np.zeros(E)
     for e in edges:
         i = eidx[e]
         for k in range(K):
-            A_ub[i, fvar(k, e)] = 1.0
-        A_ub[i, ovar(e)] = -1.0
+            ub_data.append(1.0);  ub_row.append(i); ub_col.append(fvar(k, e))
+        ub_data.append(-1.0); ub_row.append(i); ub_col.append(ovar(e))
         b_ub[i] = cap[e]
+    A_ub = coo_matrix((ub_data, (ub_row, ub_col)), shape=(E, N)).tocsr()
 
     bounds = [(0, None)] * N
+    # method via env: "highs" (auto, dual-simplex) is the safe default; set
+    # ILP_LP_METHOD=highs-ipm for the parallel interior-point solver, which is far
+    # faster on large sparse LPs (and uses many cores). Objective-value-exact either way.
+    method = os.environ.get("ILP_LP_METHOD", "highs")
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                  bounds=bounds, method="highs")
+                  bounds=bounds, method=method)
     if not res.success:
         return {"feasible": False, "opt_reservoir_bps": None, "status": res.message}
     over_total = sum(res.x[ovar(e)] for e in edges)
