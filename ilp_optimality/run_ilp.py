@@ -133,22 +133,27 @@ def main():
     print(f"[run_ilp] streaming {len(times)} snapshot(s) at indices "
           f"{[t // STEP_NS for t in times]} (one in RAM at a time)")
 
-    rows = []
-    for t_ns in times:
-        t_s = t_ns / 1e9
-        state = state0 if t_ns == 0 else build_one(GEN, max_isl, max_gsl, t_ns)
-        nodes, edges, cap, delay = snapshot_view(state, t_s)
-        print(f"[run_ilp] t={t_s:.0f}s: {len(nodes)} nodes, {len(edges)} up-links — solving...")
-        opt = solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay)
-        print(f"[run_ilp]   -> {opt}")
-        rows.append([t_s, opt.get("opt_reservoir_bps"), opt.get("feasible"), opt.get("status")])
-        state = None  # discard; never hold >1 snapshot
-
-    with open(os.path.join(OUT, "optimality_gap.csv"), "w", newline="") as f:
+    # Write the header up front and flush+fsync each row as soon as its snapshot
+    # solves, so a kill/crash on a long run never loses completed snapshots.
+    csv_path = os.path.join(OUT, "optimality_gap.csv")
+    n = 0
+    with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["snapshot_t", "opt_reservoir_bps", "feasible", "status"])
-        w.writerows(rows)
-    print(f"[run_ilp] wrote {OUT}/optimality_gap.csv ({len(rows)} row(s))")
+        f.flush(); os.fsync(f.fileno())
+        for t_ns in times:
+            t_s = t_ns / 1e9
+            state = state0 if t_ns == 0 else build_one(GEN, max_isl, max_gsl, t_ns)
+            nodes, edges, cap, delay = snapshot_view(state, t_s)
+            print(f"[run_ilp] t={t_s:.0f}s: {len(nodes)} nodes, {len(edges)} up-links — solving...")
+            opt = solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay)
+            print(f"[run_ilp]   -> {opt}")
+            w.writerow([t_s, opt.get("opt_reservoir_bps"), opt.get("feasible"), opt.get("status")])
+            f.flush(); os.fsync(f.fileno())   # persist this row immediately
+            n += 1
+            print(f"[run_ilp]   (wrote row {n}/{len(times)} to {csv_path})")
+            state = None  # discard; never hold >1 snapshot
+    print(f"[run_ilp] done: {csv_path} ({n} row(s))")
 
 
 if __name__ == "__main__":
