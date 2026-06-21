@@ -129,6 +129,26 @@ def main():
               "deadline_s": w.deadline_s} for w in wls]
     print(f"[run_ilp] {len(gs)} ground stations, {len(wls)} flows")
 
+    # LOSSLESS speedup: the reservoir LP is fluid multi-commodity flow with no
+    # per-flow deadline constraint, so flows sharing a (src,dst) pair are fungible.
+    # Aggregating them into one commodity (summed demand) gives the IDENTICAL optimum
+    # while cutting commodities ~306 -> ~60 pairs (≈5x fewer LP variables/rows).
+    # Disable with ILP_AGGREGATE=0 if per-flow constraints are ever added to the LP.
+    if os.environ.get("ILP_AGGREGATE", "1") == "1":
+        agg = {}
+        for fl in flows:
+            key = (fl["src"], fl["dst"])
+            if key in agg:
+                agg[key]["demand_bps"] += fl["demand_bps"]
+            else:
+                agg[key] = {"id": len(agg), "src": fl["src"], "dst": fl["dst"],
+                            "demand_bps": fl["demand_bps"], "deadline_s": fl["deadline_s"]}
+        flows_solved = list(agg.values())
+        print(f"[run_ilp] aggregated {len(flows)} flows -> {len(flows_solved)} "
+              f"commodities by (src,dst) [ILP_AGGREGATE=1]")
+    else:
+        flows_solved = flows
+
     times = chosen_times()
     print(f"[run_ilp] streaming {len(times)} snapshot(s) at indices "
           f"{[t // STEP_NS for t in times]} (one in RAM at a time)")
@@ -145,8 +165,9 @@ def main():
             t_s = t_ns / 1e9
             state = state0 if t_ns == 0 else build_one(GEN, max_isl, max_gsl, t_ns)
             nodes, edges, cap, delay = snapshot_view(state, t_s)
-            print(f"[run_ilp] t={t_s:.0f}s: {len(nodes)} nodes, {len(edges)} up-links — solving...")
-            opt = solve_snapshot_min_reservoir(nodes, edges, cap, flows, delay)
+            print(f"[run_ilp] t={t_s:.0f}s: {len(nodes)} nodes, {len(edges)} up-links, "
+                  f"{len(flows_solved)} commodities — solving...")
+            opt = solve_snapshot_min_reservoir(nodes, edges, cap, flows_solved, delay)
             print(f"[run_ilp]   -> {opt}")
             w.writerow([t_s, opt.get("opt_reservoir_bps"), opt.get("feasible"), opt.get("status")])
             f.flush(); os.fsync(f.fileno())   # persist this row immediately
