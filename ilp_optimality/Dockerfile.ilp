@@ -1,0 +1,26 @@
+# Dockerfile for the ILP optimality-gap experiment (Kuiper-630)
+# Builds a reproducible image to run on AWS via Claude Code.
+FROM python:3.11-slim
+
+# system deps (HiGHS comes via scipy; add build tools just in case)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# Python deps. scipy>=1.11 ships the HiGHS LP/MILP backend (no license needed).
+# Add highspy for the standalone solver, pulp+networkx as alternatives.
+RUN pip install --no-cache-dir \
+    numpy scipy networkx highspy pulp
+
+# The experiment scripts (mounted or COPY'd at deploy time)
+COPY ilp_optimality.py /work/ilp_optimality.py
+COPY run_ilp.py        /work/run_ilp.py
+
+# satgenpy + the hypatia harness are expected to be mounted at /work/hypatia
+# (so the ILP reads the SAME DynamicState the planner uses). Set PYTHONPATH to find them.
+ENV PYTHONPATH=/work/hypatia:/work/hypatia/satgenpy
+
+# Default: run the optimality experiment, write optimality_gap.csv to /work/out
+VOLUME ["/work/hypatia", "/work/out"]
+ENTRYPOINT ["python3", "/work/run_ilp.py"]
