@@ -141,16 +141,25 @@ def run_config(state, flows, cfg, t0=0.0, util=0.9):
     #     reservoir = Σ_links max(0, load_bps − cap). êₕ uses the windowed bottleneck effective
     #     bandwidth = min_path util·cap/n_final; faircap = first-hop final share; linerate = line rate.
     #     HARD CHECK: any êₕ config MUST give 0 congested links here (Σ êₕ ≤ util·cap < cap per link).
+    # Count flows per PHYSICAL link (final). The reservoir is per-link, so the fair
+    # share must use the per-link flow count n_link[ℓ] for EVERY hop — including the
+    # first. (Using the GS-transmitter count src_load[a] for first hops over-allocates
+    # when a GS link also appears as a transit hop in some candidate path, breaking
+    # Σ êₕ ≤ util·cap. Per-link counts make the invariant hold by construction.)
+    n_link = defaultdict(int)
+    for (path, hopcaps) in committed:
+        for (a, b, cap) in hopcaps:
+            n_link[(a, b)] += 1
     link_load_rerated = defaultdict(float)
     for (path, hopcaps) in committed:
         shares = []
-        for i, (a, b, cap) in enumerate(hopcaps):
-            nf = max((src_load.get(a, 0) if i == 0 else load.get((a, b), 0)), 1)  # FINAL counts
+        for (a, b, cap) in hopcaps:
+            nf = max(n_link[(a, b)], 1)
             shares.append((a, b, cap, util * cap / nf))
         if f2 == "ehat":
             rr = min(s for *_, s in shares)
         elif f2 == "faircap":
-            rr = shares[0][3]            # first-hop FINAL fair share
+            rr = shares[0][3]            # first-hop final per-link fair share
         else:                            # linerate (load-independent line rate)
             rr = shares[0][2]
         for (a, b, cap, s) in shares:
